@@ -1,5 +1,5 @@
-# Learning to Label
-This is the Pytorch implementation on **classification** of the paper 'Learning to Impute: A General Framework for Semi-supervised Learning' including code for MixMatch (MM), Mean Teacher (MT) and both the option1 and option2 proposed in 'Learning to Label for Semi-Supervised Learning'.
+# Learning to Impute
+This is the Pytorch implementation on **classification** of the paper 'Learning to Impute: A General Framework for Semi-supervised Learning' including code for MixMatch (MM), Mean Teacher (MT) and both the option1 and option2 proposed in 'Learning to Impute: A General Framework for Semi-supervised Learning'.
 
 
 ## Requirements
