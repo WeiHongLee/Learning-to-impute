@@ -1,1 +1,1 @@
-python train-MM.py --gpu 2 --n-labeled 250 --out cifar10MM@250
+python train-MM.py --gpu <gpu_id> --n-labeled 250 --out cifar10MM@250

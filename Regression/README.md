@@ -17,7 +17,7 @@ This is the Pytorch implementation on **Regression** (Facial Keypoints Detection
 Download the dataset from https://github.com/tomasjakab/imm/. Unzip and place the whole dataset folder in ./data/
 
 ### Train
-Train the option1 by 250 labeled data of CIFAR-10 dataset:
+Train the option1 by 1% of labeled data of AFLW dataset:
 
 ```
 python train-Ours-option1.py --gpu <gpu_id> --n-labeled 0.01 --out alfwOpt1@0.01
