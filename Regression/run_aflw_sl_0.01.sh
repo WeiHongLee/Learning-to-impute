@@ -1,0 +1,1 @@
+python train-sl.py --gpu 2 --n-labeled 0.01 --out aflwSL@0.01
