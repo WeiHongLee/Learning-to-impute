@@ -22,6 +22,6 @@ python train-Ours-option1.py --gpu <gpu_id> --n-labeled 250 --out cifar10Opt1@25
 
 ### Monitoring training progress
 ```
-tensorboard.sh --port 6006 --logdir cifar10Opt1@250
+tensorboard --port 6006 --logdir cifar10Opt1@250
 ```
 
