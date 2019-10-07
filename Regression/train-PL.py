@@ -148,7 +148,7 @@ def main():
     # Train and val
     for epoch in range(start_epoch, args.epochs):
         if (epoch + 1) % 5 == 0 and (epoch + 1) <= args.epochs:
-            optimizer.param_groups[0]['lr'] * 0.1
+            optimizer.param_groups[0]['lr'] *= 0.1
 
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
