@@ -1,5 +1,5 @@
 # Learning to Impute
-This is the Pytorch implementation on **Regression** (Facial Keypoints Detection on the AFLW Dataset) of the paper 'Learning to Impute: A General Framework for Semi-supervised Learning' including code for the Supervised Learning (SL), Pseudo Label (PL) , Mean Teacher (MT) and both the option1 and option2 proposed in 'Learning to Impute: A General Framework for Semi-supervised Learning'.
+This is the Pytorch implementation on **Facial Landmark Regression** (i.e., Facial Keypoints Detection on the AFLW Dataset) of the paper 'Learning to Impute: A General Framework for Semi-supervised Learning' including code for the Supervised Learning (SL), Pseudo Label (PL) , Mean Teacher (MT) and both the option1 and option2 proposed in 'Learning to Impute: A General Framework for Semi-supervised Learning'.
 
 
 ## Requirements
