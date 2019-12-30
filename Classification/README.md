@@ -1,5 +1,5 @@
 # Learning to Impute
-This is the Pytorch implementation on **classification** on CIFAR-10 of the paper 'Learning to Impute: A General Framework for Semi-supervised Learning' including code for MixMatch (MM, Code is adapted from [here](https://github.com/YU1ut/MixMatch-pytorch)), Mean Teacher (MT) and both the option1 and option2 proposed in 'Learning to Impute: A General Framework for Semi-supervised Learning'.
+This is the Pytorch implementation on **Image Classification** on CIFAR-10 of the paper 'Learning to Impute: A General Framework for Semi-supervised Learning' including code for MixMatch (MM, Code is adapted from [here](https://github.com/YU1ut/MixMatch-pytorch)), Mean Teacher (MT) and both the option1 and option2 proposed in 'Learning to Impute: A General Framework for Semi-supervised Learning'.
 
 
 ## Requirements
