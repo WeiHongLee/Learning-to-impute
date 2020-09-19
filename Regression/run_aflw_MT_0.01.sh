@@ -1,1 +1,0 @@
-python train-MT.py --gpu <gpu_id> --n-labeled 0.01 --out aflwMT@0.01

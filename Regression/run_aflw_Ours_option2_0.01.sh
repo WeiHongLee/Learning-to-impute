@@ -1,1 +1,0 @@
-python train-Ours-option2.py --gpu <gpu_id> --n-labeled 0.01 --out aflwOpt2@0.01

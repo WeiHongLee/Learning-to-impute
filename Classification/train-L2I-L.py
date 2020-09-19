@@ -25,7 +25,7 @@ from collections import OrderedDict
 from tensorboardX import SummaryWriter
 import pdb
 
-parser = argparse.ArgumentParser(description='PyTorch L2LSSL Training')
+parser = argparse.ArgumentParser(description='PyTorch L2I4SSL Training')
 # Optimization options
 parser.add_argument('--epochs', default=1024, type=int, metavar='N',
                     help='number of total epochs to run')
@@ -168,7 +168,6 @@ def main():
         writer.add_scalar('accuracy/val_acc', val_acc, step)
         writer.add_scalar('accuracy/test_acc', test_acc, step)
         
-        # scheduler.step()
 
         # append logger file
         logger.append([train_loss, train_loss_x, train_loss_u, val_loss, val_acc, test_loss, test_acc])
@@ -249,15 +248,15 @@ def train(labeled_trainloader, unlabeled_trainloader, train_val_loader, model, t
             inputs_u2 = inputs_u2.cuda()
             inputs_val, targets_val = inputs_val.cuda(), targets_val.cuda()
 
-
         with torch.no_grad():
-            # guessing pseudo labels
+            # guessing pseudo labels via the teacher network
             targets_u = target_model(inputs_u2).detach()
             targets_u = F.softmax(targets_u, dim=1)
 
+
         # forward
         all_inputs = torch.cat([inputs_x, inputs_u], dim=0)
-        all_targets = torch.cat([targets_x, targets_u], dim=0)
+        all_targets = torch.cat([targets_x, targets_u.data], dim=0)
 
         # interleave labeled and unlabed samples between batches to get correct batchnorm calculation 
         mixed_input = list(torch.split(all_inputs, batch_size))
@@ -274,7 +273,6 @@ def train(labeled_trainloader, unlabeled_trainloader, train_val_loader, model, t
 
         Lx, Lu, w = criterion(logits_x, all_targets[:batch_size], logits_u, all_targets[batch_size:], epoch+batch_idx/args.val_iteration, rampup_length)
         loss = Lx + w * Lu
-        # loss = Lx + 1 * Lu
 
         # record loss
         losses.update(loss.item(), inputs_x.size(0))
@@ -288,12 +286,15 @@ def train(labeled_trainloader, unlabeled_trainloader, train_val_loader, model, t
         optimizer.step()
         optimizer.zero_grad()
 
+        # meta update
 
-        
         for params, tmp_params in zip(model.parameters(), tmp_model.parameters()):
             tmp_params.data.copy_(params.data)
-        targets_u = tmp_model(inputs_u2)
-        targets_u = F.softmax(targets_u, dim=1)
+
+        # guessing pseudo labels
+        p = tmp_model(inputs_u2)
+        p = Variable(p.data, requires_grad=True)
+        targets_u = F.softmax(p, dim=1)
 
         logits_u = model(inputs_u)
         probs_u = F.softmax(logits_u, dim=1)
@@ -305,7 +306,7 @@ def train(labeled_trainloader, unlabeled_trainloader, train_val_loader, model, t
         for (key, val), grad in zip(model.named_parameters(), grads):
 
             if grad is not None:
-                adapted_params[key] = val.detach() - 50 * args.lr * grad
+                adapted_params[key] = val.detach() - 100 * args.lr * grad
                 state_params[key] = adapted_params[key]
             else:
                 adapted_params[key] = val.detach()
@@ -313,15 +314,20 @@ def train(labeled_trainloader, unlabeled_trainloader, train_val_loader, model, t
 
         train_val_outs = model(inputs_val, state_params)
         train_val_loss = -torch.mean(torch.sum(F.log_softmax(train_val_outs, dim=1) * targets_val, dim=1))
-        # derive the meta gradient on model
-        meta_grads = torch.autograd.grad(train_val_loss, tmp_model.parameters(), allow_unused=True)
+        
+        # derive gradient on pseudo labels
+        p_grad = torch.autograd.grad(train_val_loss, p, retain_graph=True, allow_unused=True)[0]
+        # update pseudo labels
+        p.data += - 1 * p_grad
+        targets_u = F.softmax(p.data, dim=1)
+        all_targets = torch.cat([targets_x, targets_u], dim=0)
 
-        for (key, val), grad in zip(model.named_parameters(), meta_grads):
-            if grad is not None:
-                val.grad = grad.detach()
+        Lu = torch.mean((probs_u - targets_u.data) ** 2)
+        Lu.backward()
         optimizer.step()
 
 
+        
         ema_optimizer.step()
         target_optimizer.step(global_step)
         global_step += 1
@@ -413,6 +419,26 @@ def linear_rampup(current, rampup_length=1024):
     else:
         current = np.clip(current / rampup_length, 0.0, 1.0)
         return float(current)
+
+# def guess_labels(u_pseudo_labels, temperature=1, hard=True, threshold=0.95):
+
+#     targets_u_one_hot = F.gumbel_softmax(u_pseudo_labels, temperature, hard=hard)
+#     probs_u = F.softmax(u_pseudo_labels, 1)
+#     greater_than_thresh = (probs_u > threshold).any(1, keepdim=True).float()
+#     less_than_thresh = torch.ones(probs_u.size(0), 1).float().cuda() - greater_than_thresh
+#     targets_u = greater_than_thresh * targets_u_one_hot + less_than_thresh * probs_u
+#     count = 0
+#     while torch.sum(torch.isnan(targets_u)):
+#         targets_u_one_hot = F.gumbel_softmax(u_pseudo_labels, temperature, hard=True)
+#         targets_u = greater_than_thresh * targets_u_one_hot + less_than_thresh * probs_u
+#         count+=1
+#         print('nan count {}'.format(count))
+#     # targets_u = u_pseudo_labels
+#     return targets_u
+
+def guess_labels(u_pseudo_labels):
+    targets_u = F.softmax(u_pseudo_labels, dim=1)
+    return targets_u
 
 class SemiLoss(object):
     def __call__(self, outputs_x, targets_x, outputs_u, targets_u, epoch, rampup_length):

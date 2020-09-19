@@ -1,1 +1,0 @@
-python train-MT.py --gpu <gpu_id> --n-labeled 250 --out cifar10MT@250

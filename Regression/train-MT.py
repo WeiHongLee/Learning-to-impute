@@ -16,6 +16,7 @@ import torch.optim as optim
 import torch.utils.data as data
 import torchvision.transforms as transforms
 import torch.nn.functional as F
+from dataset.sampler import RandomSampler, BatchSampler
 
 import models.tcdcnn as models
 import dataset.aflw as dataset
@@ -43,7 +44,7 @@ parser.add_argument('--manualSeed', type=int, default=0, help='manual seed')
 parser.add_argument('--gpu', default='0', type=str,
                     help='id(s) for CUDA_VISIBLE_DEVICES')
 #Method options
-parser.add_argument('--n-labeled', type=float, default=250,
+parser.add_argument('--n-labeled', type=float, default=0.01,
                         help='Number of labeled data')
 parser.add_argument('--val-iteration', type=int, default=150,
                         help='Number of labeled data')
@@ -53,6 +54,8 @@ parser.add_argument('--alpha', default=0.75, type=float)
 parser.add_argument('--lambda-u', default=75, type=float)
 parser.add_argument('--T', default=0.5, type=float)
 parser.add_argument('--ema-decay', default=0.999, type=float)
+parser.add_argument('--data-root', default='./data/aflw_release-2/', type=str, metavar='PATH',
+                    help='path to dataset')
 
 args = parser.parse_args()
 state = {k: v for k, v in args._get_kwargs()}
@@ -67,7 +70,7 @@ if args.manualSeed is None:
 np.random.seed(args.manualSeed)
 torch.manual_seed(args.manualSeed)
 
-best_error = 100  # best test accuracy
+best_acc = 100  # best test accuracy
 mean = 0
 std = 0
 global_step = 0
@@ -80,34 +83,37 @@ def main():
     if not os.path.isdir(args.out):
     	mkdir_p(args.out)
     # Data
-    print(f'==> Preparing aflw')
+    print(f'==> Preparing AFLW')
     transform_train = transforms.Compose([
         transforms.Resize((60,60)),
         ])
     transform_val = transforms.Compose([
         transforms.Resize((60,60)),
         ])
-    num_workers = 24
-    train_labeled_set, train_unlabeled_set, stat_labeled_set, train_val_set, val_set, test_set, mean, std = dataset.get_aflw('./data/aflw_release-2/', args.n_labeled, transform_train, transform_val)
-    labeled_trainloader = data.DataLoader(train_labeled_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
-    unlabeled_trainloader = data.DataLoader(train_unlabeled_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
-    train_val_loader = data.DataLoader(train_val_set, batch_size=args.batch_size, shuffle=True, num_workers=num_workers, drop_last=True)
-    val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
-    test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
+    train_labeled_set, train_unlabeled_set, stat_labeled_set, train_val_set, val_set, test_set, mean, std = dataset.get_alfw(args.data_root, args.n_labeled, transform_train, transform_val)
+
+    num_samples = args.val_iteration * args.batch_size
+    sampler_x = RandomSampler(train_labeled_set, replacement=True, num_samples=num_samples)
+    batch_sampler_x = BatchSampler(sampler_x, args.batch_size, drop_last=True)
+    labeled_trainloader = data.DataLoader(train_labeled_set, batch_sampler=batch_sampler_x, num_workers=16, pin_memory=True)
+    sampler_u = RandomSampler(train_unlabeled_set, replacement=True, num_samples=num_samples)
+    batch_sampler_u = BatchSampler(sampler_u, args.batch_size, drop_last=True)
+    unlabeled_trainloader = data.DataLoader(train_unlabeled_set, batch_sampler=batch_sampler_u, num_workers=16, pin_memory=True)
+    val_loader = data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
+    test_loader = data.DataLoader(test_set, batch_size=args.batch_size, shuffle=False, num_workers=16, pin_memory=True)
+
+
+    sampler_trainval = RandomSampler(train_labeled_set, replacement=True, num_samples=num_samples)
+    batch_sampler_trainval = BatchSampler(sampler_trainval, args.batch_size, drop_last=True)
+    train_val_loader = data.DataLoader(train_labeled_set, batch_sampler=batch_sampler_trainval, num_workers=16, pin_memory=True)
+    args.val_iteration=len(unlabeled_trainloader)
+
 
 
     # Model
     print("==> creating TCDCN")
 
-    def create_model(ema=False):
-        model = models.TCDCNN()
-        model = model.cuda()
-
-        if ema:
-            for param in model.parameters():
-                param.detach_()
-
-        return model
+    
 
     model = create_model()
     ema_model = create_model(ema=True)
@@ -118,6 +124,7 @@ def main():
 
     train_criterion = nn.MSELoss()
     criterion = nn.MSELoss()
+    # optimizer = optim.Adam(model.parameters(), lr=args.lr)
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 
 
@@ -126,14 +133,14 @@ def main():
     start_epoch = 0
     rampup_length = float(args.epochs) / float(args.batch_size)
     # Resume
-    title = 'AFLW'
+    title = 'celeba-mtfl'
     if args.resume:
         # Load.
         print('==> Resuming from checkpoint..')
         assert os.path.isfile(args.resume), 'Error: no checkpoint directory found!'
         args.out = os.path.dirname(args.resume)
         checkpoint = torch.load(args.resume)
-        best_error = checkpoint['best_error']
+        best_acc = checkpoint['best_acc']
         start_epoch = checkpoint['epoch']
         model.load_state_dict(checkpoint['state_dict'])
         ema_model.load_state_dict(checkpoint['ema_state_dict'])
@@ -148,15 +155,17 @@ def main():
     test_accs = []
     # Train and val
     for epoch in range(start_epoch, args.epochs):
-        if (epoch + 1) % 5 == 0 and (epoch + 1) <= args.epochs:
-            optimizer.param_groups[0]['lr'] * 0.1
+        if (epoch + 1) % 100 == 0 and (epoch + 1) <= args.epochs:
+            optimizer.param_groups[0]['lr'] *= 0.1
 
         print('\nEpoch: [%d | %d] LR: %f' % (epoch + 1, args.epochs, state['lr']))
 
         train_loss, train_loss_x, train_loss_u = train(labeled_trainloader, unlabeled_trainloader, model, target_model, optimizer, ema_optimizer, target_optimizer, train_criterion, epoch, use_cuda, rampup_length)
         _, train_me, train_fr = validate(labeled_trainloader, model, criterion, epoch, use_cuda, mode='Train Stats')
-        val_loss, val_me, val_fr = validate(val_loader, model, criterion, epoch, use_cuda, mode='Valid Stats')
-        test_loss, test_me, test_fr = validate(test_loader, model, criterion, epoch, use_cuda, mode='Test Stats ')
+        # pdb.set_trace()
+        val_loss, val_me, val_fr = validate(val_loader, ema_model, criterion, epoch, use_cuda, mode='Valid Stats')
+        # pdb.set_trace()
+        test_loss, test_me, test_fr = validate(test_loader, ema_model, criterion, epoch, use_cuda, mode='Test Stats ')
 
         step = args.batch_size * args.val_iteration * (epoch + 1)
 
@@ -172,14 +181,13 @@ def main():
         writer.add_scalar('accuracy/val_fr', val_fr, step)
         writer.add_scalar('accuracy/test_fr', test_fr, step)
         
-        # scheduler.step()
 
         # append logger file
         logger.append([train_loss, train_loss_x, train_loss_u, train_me, train_fr, val_loss, val_me, val_fr, test_loss, test_me, test_fr])
 
         # save model
-        is_best = val_me < best_error
-        best_error = min(val_me, best_error)
+        is_best = val_me < best_acc
+        best_acc = min(val_me, best_acc)
         if is_best:
             best_test = test_me
         save_checkpoint({
@@ -187,7 +195,7 @@ def main():
                 'state_dict': model.state_dict(),
                 'ema_state_dict': ema_model.state_dict(),
                 'me': val_me,
-                'best_error': best_error,
+                'best_acc': best_acc,
                 'optimizer' : optimizer.state_dict(),
             }, is_best)
         test_accs.append(test_me)
@@ -197,6 +205,8 @@ def main():
     print('Best acc')
     print(best_test)
 
+    print('Mean acc:')
+    print(np.mean(test_accs[-20:]))
 
 
 def train(labeled_trainloader, unlabeled_trainloader, model, target_model, optimizer, ema_optimizer, target_optimizer, criterion, epoch, use_cuda, rampup_length):
@@ -211,8 +221,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, target_model, optim
     global global_step
 
     bar = Bar('Training', max=args.val_iteration)
-    labeled_train_iter = iter(labeled_trainloader)
-    unlabeled_train_iter = iter(unlabeled_trainloader)
+
 
     
     model.train()
@@ -234,30 +243,46 @@ def train(labeled_trainloader, unlabeled_trainloader, model, target_model, optim
 
         batch_size = inputs_x.size(0)
 
+        # Transform label to one-hot
+        # targets_x = torch.zeros(batch_size, 10).scatter_(1, targets_x.view(-1,1), 1)
+
         if use_cuda:
             inputs_x, targets_x = inputs_x.cuda(), targets_x.cuda(non_blocking=True)
             inputs_u, inputs_u2 = inputs_u.cuda(), inputs_u2.cuda()
             x1, y1, x2, y2 = x1.cuda(), y1.cuda(), x2.cuda(), y2.cuda()
+            # inputs_u = inputs_u.cuda()
+            # inputs_u2 = inputs_u2.cuda()
 
 
         with torch.no_grad():
-            # guessing labels
+            # compute guessed labels of unlabel samples
             outputs_u2 = target_model(inputs_u2)
             p = outputs_u2 * std + mean
             pt = p.view(p.size(0), 5, 2)
+            # pdb.set_trace()
             pt[:,:,0] = pt[:,:,0] - x2.unsqueeze(1).float() + x1.unsqueeze(1).float()
             pt[:,:,1] = pt[:,:,1] - y2.unsqueeze(1).float() + y1.unsqueeze(1).float()
             targets_u = pt.view(pt.size(0), -1)
             targets_u = (targets_u - mean) / std
 
-        
-        logits_x = model(inputs_x) 
-        logits_u = model(inputs_u)
+
+
+        all_inputs = torch.cat([inputs_x, inputs_u], dim=0)
+        all_inputs = list(torch.split(interleave(all_inputs, 2), inputs_x.size(0)))
+        logits = [model(all_inputs[0])]
+        logits.append(model(all_inputs[1]))
+        logits = de_interleave(torch.cat(logits, dim=0), 2)
+        logits = list(torch.split(logits, inputs_x.size(0)))
+        logits_x, logits_u = logits[0], logits[1]
+
+
+
         targets_x = (targets_x - mean) / std
         Lx = criterion(logits_x, targets_x)
         Lu = ((logits_u - targets_u) ** 2).mean()
-        w = linear_rampup(global_step, args.epochs * args.val_iteration * 0.4) * 1
+        w = linear_rampup(global_step, args.epochs * args.val_iteration * 0.4) * args.lambda_u
         loss = Lx + w * Lu
+
 
         # record loss
         losses.update(loss.item(), inputs_x.size(0))
@@ -271,7 +296,7 @@ def train(labeled_trainloader, unlabeled_trainloader, model, target_model, optim
         optimizer.step()
         target_optimizer.step(global_step)
         global_step += 1
-        # ema_optimizer.step()
+        ema_optimizer.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -303,8 +328,8 @@ def validate(valloader, model, criterion, epoch, use_cuda, mode):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
-    ME = AverageMeter()
-    FR = AverageMeter()
+    top1 = AverageMeter()
+    top5 = AverageMeter()
     global mean
     global std
 
@@ -321,16 +346,19 @@ def validate(valloader, model, criterion, epoch, use_cuda, mode):
             if use_cuda:
                 inputs, targets = inputs.cuda(), targets.cuda(non_blocking=True)
 
+
             outputs = model(inputs)
             outputs = outputs * std + mean
 
             loss = criterion(outputs, targets)
-            # pdb.set_trace()
             mean_error, failure_rate = evaluate(outputs, targets)
 
+            prec1 = mean_error
+            prec5 = failure_rate
+
             losses.update(loss.item(), inputs.size(0))
-            ME.update(best_error.item(), inputs.size(0))
-            FR.update(failure_rate.item(), inputs.size(0))
+            top1.update(prec1.item(), inputs.size(0))
+            top5.update(prec5.item(), inputs.size(0))
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -345,12 +373,12 @@ def validate(valloader, model, criterion, epoch, use_cuda, mode):
                         total=bar.elapsed_td,
                         eta=bar.eta_td,
                         loss=losses.avg,
-                        top1=ME.avg,
-                        top5=FR.avg,
+                        top1=top1.avg,
+                        top5=top5.avg,
                         )
             bar.next()
         bar.finish()
-    return (losses.avg, ME.avg, FR.avg,)
+    return (losses.avg, top1.avg, top5.avg,)
 
 def save_checkpoint(state, is_best, checkpoint=args.out, filename='checkpoint.pth.tar'):
     filepath = os.path.join(checkpoint, filename)
@@ -401,7 +429,7 @@ class WeightEMA(object):
                 ema_param.data.mul_(self.alpha)
                 ema_param.data.add_(param.data.detach() * one_minus_alpha)
                 # customized weight decay
-                param.data.mul_(1 - self.wd)
+                # param.data.mul_(1 - self.wd)
 class UpdateEma(object):
     def __init__(self, model, target_model, alpha=0.999):
         self.model = model
@@ -414,27 +442,27 @@ class UpdateEma(object):
         for target_param, param in zip(self.target_model.parameters(), self.model.parameters()):
             target_param.data.mul_(alpha).add_(1-alpha, param.data)
 
-def interleave_offsets(batch, nu):
-    groups = [batch // (nu + 1)] * (nu + 1)
-    for x in range(batch - sum(groups)):
-        groups[-x - 1] += 1
-    offsets = [0]
-    for g in groups:
-        offsets.append(offsets[-1] + g)
-    assert offsets[-1] == batch
-    return offsets
+def create_model(ema=False):
+    model = models.TCDCNN()
+    model = model.cuda()
+
+    if ema:
+        for param in model.parameters():
+            param.detach_()
+
+    return model
 
 
-def interleave(xy, batch):
-    nu = len(xy) - 1
-    offsets = interleave_offsets(batch, nu)
-    xy = [[v[offsets[p]:offsets[p + 1]] for p in range(nu + 1)] for v in xy]
-    for i in range(1, nu + 1):
-        xy[0][i], xy[i][i] = xy[i][i], xy[0][i]
-    return [torch.cat(v, dim=0) for v in xy]
+def interleave(x, bt):
+    s = list(x.shape)
+    return torch.reshape(torch.transpose(x.reshape([-1, bt] + s[1:]), 1, 0), [-1] + s[1:])
+
+
+def de_interleave(x, bt):
+    s = list(x.shape)
+    return torch.reshape(torch.transpose(x.reshape([bt, -1] + s[1:]), 1, 0), [-1] + s[1:])
 
 def evaluate(preds, targets):
-    # pdb.set_trace()
     # here, preds are a vector predicted by the network and targets is the corresponding gt vector
     preds = preds.view(-1,5,2)
     targets = targets.view(-1,5,2)
